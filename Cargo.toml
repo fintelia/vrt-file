@@ -16,5 +16,5 @@ quick-xml = { version = "0.23.0", features = ["serialize"] }
 rayon = "1.5.3"
 serde = { version = "1.0.137", features = ["derive"] }
 thiserror = "1.0.31"
-tiff = { path = "../image-tiff" }
+tiff = { git = "https://github.com/fintelia/image-tiff", rev = "8e5c5b44c5c7a6a3171a2d622d5a310900ced791" }
 vec_map = "0.8.2"
