@@ -4,7 +4,7 @@ use lru::LruCache;
 use quadtree_rs::{area::AreaBuilder, point::Point, Quadtree};
 use raster::{Raster, Values};
 use rayon::iter::{
-    IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
+    IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator,
 };
 use serde::{Deserialize, Deserializer};
 use std::collections::VecDeque;
@@ -17,7 +17,6 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use tiff::ColorType;
 use vec_map::VecMap;
 
-mod alloc;
 mod raster;
 
 const MAX_WEAK_SIZE: usize = 1024;
@@ -316,8 +315,6 @@ pub struct VrtFile {
     cache: Cache,
     quadtree: Quadtree<u64, u32>,
     //quadtree: QuadTree,
-
-    pool: rayon::ThreadPool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -368,10 +365,6 @@ impl VrtFile {
         Ok(Self {
             dataset,
             quadtree,
-            pool: rayon::ThreadPoolBuilder::new()
-                .num_threads(32)
-                .build()
-                .unwrap(),
             cache: Cache {
                 filenames,
                 inner: Mutex::new(CacheInner {
