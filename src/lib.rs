@@ -1,11 +1,7 @@
 use fnv::FnvHashMap;
 use lru::LruCache;
-//use quadtree_f32::QuadTree;
-use quadtree_rs::{area::AreaBuilder, point::Point, Quadtree};
 use raster::{Raster, Values};
-use rayon::iter::{
-    IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator,
-};
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Deserializer};
 use std::collections::VecDeque;
 use std::io::Cursor;
@@ -17,6 +13,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use tiff::ColorType;
 use vec_map::VecMap;
 
+mod query;
 mod raster;
 
 const MAX_WEAK_SIZE: usize = 1024;
@@ -75,6 +72,14 @@ struct Rect {
     yOff: f64,
     xSize: f64,
     ySize: f64,
+}
+impl Rect {
+    fn contains(&self, x: f64, y: f64) -> bool {
+        x >= self.xOff
+            && x <= self.xOff + self.xSize
+            && y >= self.yOff
+            && y <= self.yOff + self.ySize
+    }
 }
 
 fn split_f64s<'de, D>(d: D) -> Result<Vec<f64>, D::Error>
@@ -236,7 +241,10 @@ impl Cache {
             let a = Arc::new(raster);
             inner.weak_bytes -= a.num_bytes();
             inner.pinned_bytes += a.num_bytes();
-            assert!(inner.pinned.insert(tile, CacheEntry::Loaded(a.clone(), 1)).is_none());
+            assert!(inner
+                .pinned
+                .insert(tile, CacheEntry::Loaded(a.clone(), 1))
+                .is_none());
             drop(inner);
             f(&*a)
         } else {
@@ -296,7 +304,9 @@ impl Cache {
             match inner.pinned.remove(tile).unwrap() {
                 CacheEntry::Pending(cv, refcount) => {
                     inner.pinned_bytes += a.num_bytes();
-                    inner.pinned.insert(tile, CacheEntry::Loaded(a.clone(), refcount));
+                    inner
+                        .pinned
+                        .insert(tile, CacheEntry::Loaded(a.clone(), refcount));
                     cv.notify_all();
                 }
                 _ => unreachable!(),
@@ -313,8 +323,7 @@ pub struct VrtFile {
     dataset: VRTDataset,
 
     cache: Cache,
-    quadtree: Quadtree<u64, u32>,
-    //quadtree: QuadTree,
+    mapping: query::TileMapper,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -333,38 +342,20 @@ impl VrtFile {
         let dataset: VRTDataset = quick_xml::de::from_str(&file_contents)?;
 
         let mut filenames = Vec::new();
-        let mut quadtree = Quadtree::new(16);
-        for (i, source) in dataset.VRTRasterBand.sources.iter().enumerate() {
-                filenames.push(directory.join(&source.SourceFilename.filename));
+        for source in dataset.VRTRasterBand.sources.iter() {
+            filenames.push(directory.join(&source.SourceFilename.filename));
+        }
 
-                let x = (source.DstRect.xOff / 256.0).floor() as u64;
-                let y = (source.DstRect.yOff / 256.0).floor() as u64;
-
-                quadtree.insert(AreaBuilder::default()
-                    .anchor(Point { x, y })
-                    .dimensions((
-                        ((source.DstRect.xOff + source.DstRect.xSize) / 256.0).ceil() as u64 - x
-                            + 1,
-                        ((source.DstRect.yOff + source.DstRect.ySize) / 256.0).ceil() as u64 - y
-                            + 1,
-                    ))
-                    .build()
-                    .unwrap(), i as u32);
-                // (
-                //     quadtree_f32::ItemId(i),
-                //     quadtree_f32::Item::Rect(quadtree_f32::Rect {
-                //         min_x: source.DstRect.xOff as f32,
-                //         min_y: source.DstRect.yOff as f32,
-                //         max_x: source.DstRect.xOff as f32 + source.DstRect.xSize as f32,
-                //         max_y: source.DstRect.yOff as f32 + source.DstRect.ySize as f32,
-                //     }),
-                // )
-            }
-        //));
+        let rects: Vec<_> = dataset
+            .VRTRasterBand
+            .sources
+            .iter()
+            .map(|s| s.DstRect.clone())
+            .collect();
 
         Ok(Self {
             dataset,
-            quadtree,
+            mapping: query::TileMapper::new(rects.into_boxed_slice()),
             cache: Cache {
                 filenames,
                 inner: Mutex::new(CacheInner {
@@ -390,7 +381,7 @@ impl VrtFile {
         self.cache.alloc_cv.notify_all();
     }
 
-    /// ```
+    /// ```no_build
     /// let x = (longitude - self.dataset.GeoTransform[0]) / self.dataset.GeoTransform[1];
     /// let y = (latitude - self.dataset.GeoTransform[3]) / self.dataset.GeoTransform[5];
     /// ```
@@ -401,37 +392,7 @@ impl VrtFile {
     pub fn batch_lookup<T: Scalar + From<i16>>(&self, xys: &[(f64, f64)], output: &mut [T]) {
         let mut tiles = Vec::new();
         xys.par_iter()
-            .map(|&(x, y)| {
-                let query = self.quadtree.query(
-                    AreaBuilder::default()
-                        .anchor(Point {
-                            x: (x / 256.0).round() as u64,
-                            y: (y / 256.0).round() as u64,
-                        })
-                        .dimensions((1, 1))
-                        .build()
-                        .unwrap(),
-                );
-                // let query = self.quadtree.get_ids_that_overlap(&quadtree_f32::Rect {
-                //     min_x: x as f32,
-                //     min_y: y as f32,
-                //     max_x: x as f32,
-                //     max_y: y as f32,
-                // });
-                //for quadtree_f32::ItemId(value) in query {
-                for entry in query {
-                    let value = *entry.value_ref();
-                    let dst = &self.dataset.VRTRasterBand.sources[value as usize].DstRect;
-                    if x >= dst.xOff
-                        && x <= dst.xOff + dst.xSize
-                        && y >= dst.yOff
-                        && y <= dst.yOff + dst.ySize
-                    {
-                        return value as u32;
-                    }
-                }
-                u32::MAX
-            })
+            .map(|&(x, y)| self.mapping.get(x, y))
             .collect_into_vec(&mut tiles);
 
         let mut unique_tiles = tiles.clone();

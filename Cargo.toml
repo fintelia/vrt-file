@@ -7,14 +7,11 @@ edition = "2021"
 
 [dependencies]
 fnv = "1.0.7"
-futures = "0.3.21"
 lru = "0.7.7"
-num-traits = "0.2.15"
-quadtree-f32 = "0.4.0"
-quadtree_rs = "0.1.2"
 quick-xml = { version = "0.23.0", features = ["serialize"] }
 rayon = "1.5.3"
 serde = { version = "1.0.137", features = ["derive"] }
+smallvec = { version = "1.9.0", features = ["union"] }
 thiserror = "1.0.31"
 tiff = { git = "https://github.com/fintelia/image-tiff", rev = "8e5c5b44c5c7a6a3171a2d622d5a310900ced791" }
 vec_map = "0.8.2"
