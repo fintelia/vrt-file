@@ -6,7 +6,6 @@ use serde::{Deserialize, Deserializer};
 use std::collections::VecDeque;
 use std::io::Cursor;
 use std::mem;
-use std::os::unix::prelude::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -254,7 +253,7 @@ impl Cache {
             drop(inner);
 
             let filename = &self.filenames[tile];
-            let file_size = std::fs::metadata(filename).unwrap().size();
+            let file_size = std::fs::metadata(filename).unwrap().len();
 
             self.alloc_aux_bytes(file_size.try_into().unwrap());
             let contents = std::fs::read(filename).unwrap();
