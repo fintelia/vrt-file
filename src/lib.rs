@@ -1,4 +1,5 @@
 use fnv::FnvHashMap;
+use image::ImageDecoder;
 use lru::LruCache;
 use raster::{Raster, Values};
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
@@ -61,8 +62,8 @@ struct SourceFilename {
 struct SourceProperties {
     RasterXSize: u32,
     RasterYSize: u32,
-    BlockXSize: u32,
-    BlockYSize: u32,
+    BlockXSize: Option<u32>,
+    BlockYSize: Option<u32>,
 }
 #[derive(Deserialize, Debug, Clone)]
 #[allow(unused, non_snake_case)]
@@ -258,44 +259,64 @@ impl Cache {
             self.alloc_aux_bytes(file_size.try_into().unwrap());
             let contents = std::fs::read(filename).unwrap();
 
-            let mut img = tiff::decoder::Decoder::new(Cursor::new(contents)).unwrap();
-            let (width, height) = img.dimensions().unwrap();
-            let pixel_bytes = match img.colortype().unwrap() {
-                ColorType::Gray(bits) => bits as u64 / 8,
-                _ => unimplemented!(),
-            };
+            let raster = match filename.extension().unwrap().to_str().unwrap() {
+                "png" => {
+                    let decoder =
+                        image::codecs::png::PngDecoder::new(Cursor::new(contents)).unwrap();
+                    let (width, height) = decoder.dimensions();
+                    self.alloc_aux_bytes(decoder.total_bytes());
+                    let mut data = vec![0; decoder.total_bytes() as usize];
+                    decoder.read_image(&mut data).unwrap();
 
-            let raster_bytes = width as u64 * height as u64 * pixel_bytes;
-            self.alloc_aux_bytes(raster_bytes);
-            let values = match img.read_image().unwrap() {
-                tiff::decoder::DecodingResult::U8(mut v) => {
-                    v.shrink_to_fit();
-                    Values::U8(v)
+                    Raster {
+                        width: width as usize,
+                        height: height as usize,
+                        values: Values::U8(data),
+                    }
                 }
-                tiff::decoder::DecodingResult::U16(mut v) => {
-                    v.shrink_to_fit();
-                    Values::U16(v)
-                }
-                tiff::decoder::DecodingResult::I16(mut v) => {
-                    v.shrink_to_fit();
-                    Values::I16(v)
-                }
-                tiff::decoder::DecodingResult::F32(mut v) => {
-                    v.shrink_to_fit();
-                    Values::F32(v)
-                }
-                _ => unimplemented!(),
-            };
-            let raster = Raster {
-                width: width as usize,
-                height: height as usize,
-                values,
-            };
-            assert_eq!(raster.num_bytes(), raster_bytes);
+                "tif" | "tiff" => {
+                    let mut img = tiff::decoder::Decoder::new(Cursor::new(contents)).unwrap();
+                    let (width, height) = img.dimensions().unwrap();
+                    let pixel_bytes = match img.colortype().unwrap() {
+                        ColorType::Gray(bits) => bits as u64 / 8,
+                        ColorType::RGB(bits) => 3 * bits as u64 / 8,
+                        _ => unimplemented!(),
+                    };
 
-            drop(img);
+                    let raster_bytes = width as u64 * height as u64 * pixel_bytes;
+                    self.alloc_aux_bytes(raster_bytes);
+                    let values = match img.read_image().unwrap() {
+                        tiff::decoder::DecodingResult::U8(mut v) => {
+                            v.shrink_to_fit();
+                            Values::U8(v)
+                        }
+                        tiff::decoder::DecodingResult::U16(mut v) => {
+                            v.shrink_to_fit();
+                            Values::U16(v)
+                        }
+                        tiff::decoder::DecodingResult::I16(mut v) => {
+                            v.shrink_to_fit();
+                            Values::I16(v)
+                        }
+                        tiff::decoder::DecodingResult::F32(mut v) => {
+                            v.shrink_to_fit();
+                            Values::F32(v)
+                        }
+                        _ => unimplemented!(),
+                    };
+                    let raster = Raster {
+                        width: width as usize,
+                        height: height as usize,
+                        values,
+                    };
+                    assert_eq!(raster.num_bytes(), raster_bytes);
+                    raster
+                }
+                _ => unreachable!(),
+            };
             self.free_aux_bytes(file_size.try_into().unwrap());
 
+            let raster_bytes = raster.num_bytes();
             let a = Arc::new(raster);
 
             let mut inner = self.inner.lock().unwrap();
@@ -323,6 +344,7 @@ pub struct VrtFile {
 
     cache: Cache,
     mapping: query::TileMapper,
+    bands: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -334,7 +356,7 @@ pub enum VrtError {
 }
 
 impl VrtFile {
-    pub fn new(path: &Path) -> Result<Self, VrtError> {
+    pub fn new(path: &Path, bands: usize) -> Result<Self, VrtError> {
         let directory = path.parent().map(Path::to_owned).unwrap_or(".".into());
 
         let file_contents = std::fs::read_to_string(path)?;
@@ -368,6 +390,7 @@ impl VrtFile {
                 alloc_cv: Condvar::new(),
                 capacity_bytes: 8 << 30,
             },
+            bands,
         })
     }
 
@@ -388,7 +411,7 @@ impl VrtFile {
         &self.dataset.GeoTransform
     }
 
-    pub fn batch_lookup<T: Scalar + From<i16>>(&self, xys: &[(f64, f64)], output: &mut [T]) {
+    pub fn batch_lookup<T: Scalar>(&self, xys: &[(f64, f64)], output: &mut [T]) {
         let mut tiles = Vec::new();
         xys.par_iter()
             .map(|&(x, y)| self.mapping.get(x, y))
@@ -420,8 +443,9 @@ impl VrtFile {
                             as usize;
                         let y = ((y - dst.yOff) * src.ySize / dst.ySize + src.yOff - 0.5).round()
                             as usize;
-                        let value = T::get_value(&raster.values, y * raster.width + x);
-                        output.push_back(value);
+                        for band in 0..self.bands {
+                            output.push_back(T::get_value(&raster.values, (y * raster.width + x) * self.bands + band));
+                        }
                     }
                     });
                     (tile, output)
@@ -429,9 +453,11 @@ impl VrtFile {
                 .collect()
         /* }) */;
 
-        for (output, tile) in output.iter_mut().zip(tiles) {
+        for (tile, output) in tiles.into_iter().zip(output.chunks_mut(self.bands)) {
             if tile != u32::MAX {
-                *output = shuffled.get_mut(&tile).unwrap().pop_front().unwrap();
+                for o in output {
+                    *o = shuffled.get_mut(&tile).unwrap().pop_front().unwrap();
+                }
             }
         }
 
