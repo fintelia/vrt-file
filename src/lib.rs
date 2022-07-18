@@ -275,7 +275,9 @@ impl Cache {
                     }
                 }
                 "tif" | "tiff" => {
-                    let mut img = tiff::decoder::Decoder::new(Cursor::new(contents)).unwrap();
+                    let mut img = tiff::decoder::Decoder::new(Cursor::new(contents))
+                        .unwrap()
+                        .with_limits(tiff::decoder::Limits::unlimited());
                     let (width, height) = img.dimensions().unwrap();
                     let pixel_bytes = match img.colortype().unwrap() {
                         ColorType::Gray(bits) => bits as u64 / 8,
