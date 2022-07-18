@@ -187,31 +187,8 @@ impl Cache {
         }
     }
 
-    fn check_mem_usage(inner: &CacheInner) {
-        let mut pinned_bytes = 0;
-        for raster in inner.pinned.iter() {
-            match &raster.1 {
-                CacheEntry::Loaded(a, n) => {
-                    assert!(*n > 0);
-                    pinned_bytes += a.num_bytes();
-                }
-                _ => {}
-            }
-        }
-        assert_eq!(pinned_bytes, inner.pinned_bytes);
-
-        let mut weak_bytes = 0;
-        for raster in inner.weak.iter() {
-            weak_bytes += raster.1.num_bytes();
-        }
-        assert_eq!(weak_bytes, inner.weak_bytes);
-
-        assert!(inner.aux_bytes < (3 << 30));
-    }
-
     fn get<U, F: FnOnce(&Raster) -> U>(&self, tile: usize, f: F) -> U {
         let mut inner = self.inner.lock().unwrap();
-        Self::check_mem_usage(&inner);
 
         let ret = if let Some(entry) = inner.pinned.get_mut(tile) {
             match entry {
