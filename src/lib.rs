@@ -7,6 +7,7 @@ use serde::{Deserialize, Deserializer};
 use std::collections::VecDeque;
 use std::io::Cursor;
 use std::mem;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -26,7 +27,9 @@ impl Scalar for u16 {}
 #[derive(Deserialize, Debug)]
 #[allow(unused, non_snake_case)]
 struct VRTDataset {
+    #[serde(rename = "@rasterXSize")]
     rasterXSize: usize,
+    #[serde(rename = "@rasterYSize")]
     rasterYSize: usize,
     #[serde(deserialize_with = "split_f64s")]
     GeoTransform: Vec<f64>,
@@ -53,6 +56,7 @@ struct SimpleSource {
 #[derive(Deserialize, Debug)]
 #[allow(unused, non_snake_case)]
 struct SourceFilename {
+    #[serde(rename = "@relativeToVRT")]
     relativeToVRT: u8,
     #[serde(rename = "$value")]
     filename: String,
@@ -60,17 +64,25 @@ struct SourceFilename {
 #[derive(Deserialize, Debug)]
 #[allow(unused, non_snake_case)]
 struct SourceProperties {
+    #[serde(rename = "@RasterXSize")]
     RasterXSize: u32,
+    #[serde(rename = "@RasterYSize")]
     RasterYSize: u32,
+    #[serde(rename = "@BlockXSize")]
     BlockXSize: Option<u32>,
+    #[serde(rename = "@BlockYSize")]
     BlockYSize: Option<u32>,
 }
 #[derive(Deserialize, Debug, Clone)]
 #[allow(unused, non_snake_case)]
 struct Rect {
+    #[serde(rename = "@xOff")]
     xOff: f64,
+    #[serde(rename = "@yOff")]
     yOff: f64,
+    #[serde(rename = "@xSize")]
     xSize: f64,
+    #[serde(rename = "@ySize")]
     ySize: f64,
 }
 impl Rect {
@@ -361,7 +373,7 @@ impl VrtFile {
                 inner: Mutex::new(CacheInner {
                     pinned: VecMap::new(),
                     pinned_bytes: 0,
-                    weak: LruCache::new(MAX_WEAK_SIZE),
+                    weak: LruCache::new(NonZeroUsize::new(MAX_WEAK_SIZE).unwrap()),
                     weak_bytes: 0,
                     aux_bytes: 0,
                     user_bytes: 0,
